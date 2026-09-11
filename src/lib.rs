@@ -13,10 +13,11 @@
 //!
 //! The origin URI carries what the frame knew: `bacnet://peer?function=0a`.
 
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use transport::error::{Result, classify, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport};
 
 /// The BVLC type byte: BACnet/IP.
@@ -27,6 +28,8 @@ pub const UNICAST: u8 = 0x0a;
 pub const BROADCAST: u8 = 0x0b;
 /// The largest datagram BACnet/IP allows, header included.
 pub const MAX_DATAGRAM: usize = 1497;
+/// The most NPDU one datagram carries: the datagram less the BVLC header.
+pub const MAX_NPDU: usize = MAX_DATAGRAM - 4;
 
 /// One BVLC frame, split.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +78,7 @@ pub fn read_frame(datagram: &[u8]) -> Result<Bvlc> {
     })
 }
 
+#[derive(Clone)]
 pub struct BacnetTransport {
     bind: String,
     receive_timeout: Option<Duration>,
@@ -128,16 +132,24 @@ impl BacnetTransport {
         Ok((socket, local.to_string()))
     }
 
+    /// Take one frame from an already-bound socket, with who sent it.
+    ///
+    /// # Errors
+    /// Where nothing arrived in time, or what arrived is not BACnet/IP.
+    pub fn receive_frame(socket: &UdpSocket) -> Result<(Bvlc, SocketAddr)> {
+        let mut buffer = vec![0u8; MAX_DATAGRAM];
+        let (read, peer) = socket
+            .recv_from(&mut buffer)
+            .map_err(|e| classify("receiving a datagram", &e))?;
+        Ok((read_frame(&buffer[..read])?, peer))
+    }
+
     /// Take one frame from an already-bound socket.
     ///
     /// # Errors
     /// Where nothing arrived in time, or what arrived is not BACnet/IP.
     pub fn receive_one(&self, socket: &UdpSocket) -> Result<Arrived> {
-        let mut buffer = vec![0u8; MAX_DATAGRAM];
-        let (read, peer) = socket
-            .recv_from(&mut buffer)
-            .map_err(|e| classify("receiving a datagram", &e))?;
-        let bvlc = read_frame(&buffer[..read])?;
+        let (bvlc, peer) = Self::receive_frame(socket)?;
         Ok(Arrived::new(
             format!("bacnet://{peer}?function={:02x}", bvlc.function),
             bvlc.npdu,
@@ -174,9 +186,115 @@ impl Transport for BacnetTransport {
     }
 }
 
+impl BacnetTransport {
+    /// Both ends on this machine: an ephemeral local port, the loopback
+    /// timeout on every wait for a datagram.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("127.0.0.1:0").timing_out_after(LOOPBACK_TIMEOUT)
+    }
+}
+
+/// A bound socket waiting for its NPDUs in order, each acknowledged with an
+/// empty NPDU back — the Simple-ACK a confirmed service earns, at the layer
+/// this transport speaks — and an empty one from the sender to close.
+struct Bound {
+    transport: BacnetTransport,
+    socket: UdpSocket,
+    address: String,
+}
+
+impl FarEnd for Bound {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        let mut bytes = Vec::new();
+        loop {
+            let (bvlc, peer) = BacnetTransport::receive_frame(&self.socket)?;
+            self.socket
+                .send_to(&frame(self.transport.function, &[])?, peer)
+                .map_err(|e| classify("acknowledging an NPDU", &e))?;
+            if bvlc.npdu.is_empty() {
+                let origin = format!("bacnet://{peer}?function={:02x}", bvlc.function);
+                return Ok(Arrived::new(origin, bytes));
+            }
+            bytes.extend_from_slice(&bvlc.npdu);
+        }
+    }
+}
+
+/// A Stream longer than one NPDU travels as datagrams in order, each
+/// acknowledged before the next goes. Sent unacknowledged, a burst of them
+/// is flow-controlled by nothing but the far end's socket buffer, and a
+/// mebibyte lost datagrams on loopback.
+impl Loopback for BacnetTransport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (socket, address) = self.bind()?;
+        Ok(Box::new(Bound {
+            transport: self.clone(),
+            socket,
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        let near_end = self.clone();
+        let (own, _) = near_end.bind()?;
+        let close = std::iter::once(&[][..]);
+        for npdu in payload.chunks(MAX_NPDU).chain(close) {
+            own.send_to(&frame(near_end.function, npdu)?, address)
+                .map_err(|e| classify("sending an NPDU", &e))?;
+            near_end.receive_one(&own)?;
+        }
+        Ok(())
+    }
+
+    fn unblock(&self, _address: &str) {
+        // Every wait has its own timeout; there is no listener to poke.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shapes a protocol breaks on, as the Playground lists them.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
+    #[test]
+    fn a_loopback_round_carries_a_stream_as_datagrams() {
+        let loopback = BacnetTransport::loopback();
+        let arrived = loopback.round(b"who-is").expect("round");
+        assert_eq!(arrived.bytes, b"who-is");
+        assert!(arrived.origin_uri.starts_with("bacnet://127.0.0.1:"));
+        assert!(arrived.origin_uri.ends_with("?function=0a"));
+        let long = vec![0x2a; 5000];
+        assert_eq!(loopback.round(&long).expect("four datagrams").bytes, long);
+        assert!(loopback.ceiling().is_none());
+        assert!(loopback.refuses(&long).is_none());
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edges_whole() {
+        let loopback = BacnetTransport::loopback();
+        for (name, bytes) in edge_payloads() {
+            let arrived = loopback
+                .round(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(arrived.bytes, bytes, "{name}");
+        }
+    }
 
     #[test]
     fn a_frame_round_trips_and_a_bad_one_is_refused() {
