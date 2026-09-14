@@ -259,18 +259,7 @@ impl Loopback for BacnetTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The shapes a protocol breaks on, as the Playground lists them.
-    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-        ]
-    }
+    use transport::payload::edge_payloads;
 
     #[test]
     fn a_loopback_round_carries_a_stream_as_datagrams() {
