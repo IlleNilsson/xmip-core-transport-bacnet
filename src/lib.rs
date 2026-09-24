@@ -16,6 +16,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
+use transport::bound::{Bound, Reading};
 use transport::error::{Result, classify, protocol_error};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport};
@@ -195,26 +196,16 @@ impl BacnetTransport {
     }
 }
 
-/// A bound socket waiting for its NPDUs in order, each acknowledged with an
-/// empty NPDU back — the Simple-ACK a confirmed service earns, at the layer
-/// this transport speaks — and an empty one from the sender to close.
-struct Bound {
-    transport: BacnetTransport,
-    socket: UdpSocket,
-    address: String,
-}
-
-impl FarEnd for Bound {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
+impl Reading for BacnetTransport {
+    /// A bound socket waiting for its NPDUs in order, each acknowledged with an
+    /// empty NPDU back — the Simple-ACK a confirmed service earns, at the layer
+    /// this transport speaks — and an empty one from the sender to close.
+    fn take_one(self, socket: &UdpSocket) -> Result<Arrived> {
         let mut bytes = Vec::new();
         loop {
-            let (bvlc, peer) = BacnetTransport::receive_frame(&self.socket)?;
-            self.socket
-                .send_to(&frame(self.transport.function, &[])?, peer)
+            let (bvlc, peer) = BacnetTransport::receive_frame(socket)?;
+            socket
+                .send_to(&frame(self.function, &[])?, peer)
                 .map_err(|e| classify("acknowledging an NPDU", &e))?;
             if bvlc.npdu.is_empty() {
                 let origin = format!("bacnet://{peer}?function={:02x}", bvlc.function);
@@ -231,12 +222,7 @@ impl FarEnd for Bound {
 /// mebibyte lost datagrams on loopback.
 impl Loopback for BacnetTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (socket, address) = self.bind()?;
-        Ok(Box::new(Bound {
-            transport: self.clone(),
-            socket,
-            address,
-        }))
+        Ok(Box::new(Bound::new(self.clone(), self.bind()?)))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
