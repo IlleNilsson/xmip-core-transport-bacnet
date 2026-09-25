@@ -236,10 +236,6 @@ impl Loopback for BacnetTransport {
         }
         Ok(())
     }
-
-    fn unblock(&self, _address: &str) {
-        // Every wait has its own timeout; there is no listener to poke.
-    }
 }
 
 #[cfg(test)]
