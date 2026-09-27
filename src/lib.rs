@@ -19,7 +19,8 @@ use std::time::Duration;
 use transport::bound::{Bound, Reading};
 use transport::error::{Result, classify, protocol_error};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The BVLC type byte: BACnet/IP.
 pub const BVLC_TYPE: u8 = 0x81;
@@ -187,6 +188,43 @@ impl Transport for BacnetTransport {
     }
 }
 
+impl Configured for BacnetTransport {
+    /// The address is the local socket a Receive Location binds —
+    /// `0.0.0.0:47808` the standard port; a Send Location sends to the target
+    /// its route gives.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "broadcast",
+                kind: Kind::Boolean,
+                presence: Presence::Optional,
+                meaning: "Whether NPDUs go out as Original-Broadcast rather than \
+                          Original-Unicast; unicast when left out.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a receive waits for a datagram; unbounded when left out.",
+                applies: Applies::Receive,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let mut transport = Self::new(address);
+        if settings.optional_boolean("broadcast") == Some(true) {
+            transport = transport.broadcasting();
+        }
+        if let Some(timeout) = settings.optional_duration("timeout") {
+            transport = transport.timing_out_after(timeout);
+        }
+        Ok(transport)
+    }
+}
+
 impl BacnetTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout on every wait for a datagram.
@@ -242,6 +280,28 @@ impl Loopback for BacnetTransport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
+    use xcore::settings::Given;
+
+    #[test]
+    fn bacnet_declares_its_settings_and_reads_through_them() {
+        assert_eq!(BacnetTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [("broadcast".to_string(), Given::Boolean(true))];
+        let sending = BacnetTransport::open("0.0.0.0:47808", Applies::Send, &given).expect("send");
+        assert_eq!(sending.function, BROADCAST);
+        let given = [("timeout".to_string(), Given::Text("2s".to_string()))];
+        let receiving =
+            BacnetTransport::open("0.0.0.0:47808", Applies::Receive, &given).expect("receive");
+        assert_eq!(receiving.receive_timeout, Some(Duration::from_secs(2)));
+        assert_eq!(receiving.function, UNICAST);
+        let Err(refused) = BacnetTransport::open("0.0.0.0:47808", Applies::Send, &given) else {
+            panic!("timeout is a receive setting");
+        };
+        assert!(
+            refused.message.contains("\"timeout\""),
+            "{}",
+            refused.message
+        );
+    }
 
     #[test]
     fn a_loopback_round_carries_a_stream_as_datagrams() {
