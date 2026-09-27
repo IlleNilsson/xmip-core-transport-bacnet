@@ -19,6 +19,8 @@ use std::time::Duration;
 use transport::bound::{Bound, Reading};
 use transport::error::{Result, classify, protocol_error};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::sender::Sender;
+use transport::socket;
 use transport::{Arrived, Configured, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
@@ -85,6 +87,8 @@ pub struct BacnetTransport {
     bind: String,
     receive_timeout: Option<Duration>,
     function: u8,
+    /// The socket every send leaves from, bound once.
+    sender: Sender,
 }
 
 impl BacnetTransport {
@@ -95,13 +99,15 @@ impl BacnetTransport {
             bind: bind.into(),
             receive_timeout: None,
             function: UNICAST,
+            sender: Sender::new(),
         }
     }
 
     /// Send as broadcast rather than unicast.
     #[must_use]
-    pub const fn broadcasting(mut self) -> Self {
+    pub fn broadcasting(mut self) -> Self {
         self.function = BROADCAST;
+        self.sender = self.sender.broadcasting();
         self
     }
 
@@ -117,21 +123,13 @@ impl BacnetTransport {
     /// # Errors
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind(&self) -> Result<(UdpSocket, String)> {
-        let socket = UdpSocket::bind(&self.bind).map_err(|e| classify("binding the socket", &e))?;
-        if let Some(timeout) = self.receive_timeout {
-            socket
-                .set_read_timeout(Some(timeout))
-                .map_err(|e| classify("setting the receive timeout", &e))?;
-        }
+        let (socket, local) = socket::bind_udp(&self.bind, self.receive_timeout)?;
         if self.function == BROADCAST {
             socket
                 .set_broadcast(true)
                 .map_err(|e| classify("enabling broadcast", &e))?;
         }
-        let local = socket
-            .local_addr()
-            .map_err(|e| classify("reading the bound address", &e))?;
-        Ok((socket, local.to_string()))
+        Ok((socket, local))
     }
 
     /// Take one frame from an already-bound socket, with who sent it.
@@ -174,17 +172,7 @@ impl Transport for BacnetTransport {
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        let socket =
-            UdpSocket::bind("0.0.0.0:0").map_err(|e| classify("binding the sending socket", &e))?;
-        if self.function == BROADCAST {
-            socket
-                .set_broadcast(true)
-                .map_err(|e| classify("enabling broadcast", &e))?;
-        }
-        socket
-            .send_to(&frame(self.function, bytes)?, target)
-            .map_err(|e| classify("sending the datagram", &e))?;
-        Ok(())
+        self.sender.send_to(&frame(self.function, bytes)?, target)
     }
 }
 
