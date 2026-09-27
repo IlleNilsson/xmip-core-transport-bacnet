@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use transport::bound::{Bound, Reading};
 use transport::error::{Result, classify, protocol_error};
+use transport::kept::Kept;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::sender::Sender;
 use transport::socket;
@@ -89,6 +90,8 @@ pub struct BacnetTransport {
     function: u8,
     /// The socket every send leaves from, bound once.
     sender: Sender,
+    /// The socket the first receive binds, and every receive reads.
+    receiving: Kept<UdpSocket>,
 }
 
 impl BacnetTransport {
@@ -100,6 +103,7 @@ impl BacnetTransport {
             receive_timeout: None,
             function: UNICAST,
             sender: Sender::new(),
+            receiving: Kept::new(),
         }
     }
 
@@ -166,9 +170,11 @@ impl Transport for BacnetTransport {
         Directions::BOTH
     }
 
+    /// One frame, from the socket the first receive bound and kept: what
+    /// arrived between two receives waits in its buffer.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (socket, _) = self.bind()?;
-        Ok(vec![self.receive_one(&socket)?])
+        let socket = self.receiving.bound(|| self.bind())?;
+        Ok(vec![self.receive_one(socket)?])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -347,6 +353,16 @@ mod tests {
             "{}",
             arrived.origin_uri
         );
+    }
+
+    #[test]
+    fn every_receive_reads_the_socket_the_first_bound() {
+        let receiver = BacnetTransport::loopback();
+        receiver.receiving.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.receiving.address().expect("address");
+        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+            BacnetTransport::loopback().send(at, payload)
+        });
     }
 
     #[test]
