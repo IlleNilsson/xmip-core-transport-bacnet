@@ -26,9 +26,9 @@ use transport::{Arrived, Configured, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The BVLC type byte: BACnet/IP.
-pub const BVLC_TYPE: u8 = 0x81;
+const BVLC_TYPE: u8 = 0x81;
 /// Original-Unicast-NPDU.
-pub const UNICAST: u8 = 0x0a;
+const UNICAST: u8 = 0x0a;
 /// Original-Broadcast-NPDU.
 pub const BROADCAST: u8 = 0x0b;
 /// The largest datagram BACnet/IP allows, header included.
@@ -140,7 +140,7 @@ impl BacnetTransport {
     ///
     /// # Errors
     /// Where nothing arrived in time, or what arrived is not BACnet/IP.
-    pub fn receive_frame(socket: &UdpSocket) -> Result<(Bvlc, SocketAddr)> {
+    fn receive_frame(socket: &UdpSocket) -> Result<(Bvlc, SocketAddr)> {
         let mut buffer = vec![0u8; MAX_DATAGRAM];
         let (read, peer) = socket
             .recv_from(&mut buffer)
