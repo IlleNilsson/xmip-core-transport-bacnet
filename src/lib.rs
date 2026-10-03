@@ -11,19 +11,41 @@
 //! registration and the BBMD tables, are addressing and arrive with the
 //! routing capability. Objects and properties are a contract's business.
 //!
+//! **A confirmed request's client is answered after the whole receive
+//! cycle**: it waits for a Simple-ACK, sent on
+//! [`transport::Verdict::Accepted`]; on [`transport::Verdict::Refused`] an
+//! answer it does not send again (ASHRAE 135 clauses 18 and 20.1) — an Error
+//! (class `services`, code `service-request-denied`) for a client not
+//! identified or not permitted, a Reject (`inconsistent-parameters`) for
+//! content refused; an Error (class `resources`, code `other`), sent on
+//! [`transport::Verdict::Failed`], after which it may send the request again
+//! ([`confirmed`]). Everything else — an unconfirmed request,
+//! a broadcast, a segmented request — has nobody waiting on it, and is
+//! at-most-once ([`AT_MOST_ONCE`]). Each NPDU arrives whole.
+//!
 //! The origin URI carries what the frame knew: `bacnet://peer?function=0a`.
+
+pub mod confirmed;
 
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
+use transport::answer::Datagram;
 use transport::bound::{Bound, Reading};
 use transport::error::{Result, classify, protocol_error};
 use transport::kept::Kept;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::sender::Sender;
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
+use transport::{Acknowledgement, Arrived, Configured, Directions, Taken, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+
+use crate::confirmed::Confirmed;
+
+/// Why an NPDU that is not a confirmed request cannot be acknowledged after
+/// the receive cycle.
+pub const AT_MOST_ONCE: &str = "a BACnet NPDU that is not a confirmed request in one segment \
+                                has nobody waiting on an answer: it is a datagram";
 
 /// The BVLC type byte: BACnet/IP.
 const BVLC_TYPE: u8 = 0x81;
@@ -148,15 +170,31 @@ impl BacnetTransport {
         Ok((read_frame(&buffer[..read])?, peer))
     }
 
-    /// Take one frame from an already-bound socket.
+    /// Take one frame from an already-bound socket, whole. A confirmed
+    /// request's client waits for its answer until the receive cycle has
+    /// ended: a Simple-ACK on accepted, an Error or a Reject it does not
+    /// send again on refused, an Error it may send again on failed.
+    /// Anything else is at-most-once ([`AT_MOST_ONCE`]).
     ///
     /// # Errors
-    /// Where nothing arrived in time, or what arrived is not BACnet/IP.
+    /// Where nothing arrived in time, what arrived is not BACnet/IP, or the
+    /// socket could not be held for the answer.
     pub fn receive_one(&self, socket: &UdpSocket) -> Result<Arrived> {
         let (bvlc, peer) = Self::receive_frame(socket)?;
-        Ok(Arrived::new(
+        let acknowledgement = match Confirmed::of(&bvlc.npdu) {
+            Some(confirmed) => {
+                let answering = Datagram::to(socket, peer)?;
+                Acknowledgement::deferred(move |verdict| {
+                    let answer = confirmed.answer(verdict);
+                    answering.send(&frame(UNICAST, &answer)?)
+                })
+            }
+            None => Acknowledgement::at_most_once(AT_MOST_ONCE),
+        };
+        Ok(Arrived::whole(
             format!("bacnet://{peer}?function={:02x}", bvlc.function),
             bvlc.npdu,
+            acknowledgement,
         ))
     }
 }
@@ -170,8 +208,16 @@ impl Transport for BacnetTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered(
+            "each request is its own, answered to its own sender by its invoke id",
+        )
+    }
+
     /// One frame, from the socket the first receive bound and kept: what
-    /// arrived between two receives waits in its buffer.
+    /// arrived between two receives waits in its buffer. A confirmed
+    /// request is answered after the receive cycle, Simple-ACK or Error;
+    /// anything else is at-most-once ([`AT_MOST_ONCE`]).
     fn receive(&self) -> Result<Vec<Arrived>> {
         let socket = self.receiving.bound(|| self.bind())?;
         Ok(vec![self.receive_one(socket)?])
@@ -232,7 +278,7 @@ impl Reading for BacnetTransport {
     /// A bound socket waiting for its NPDUs in order, each acknowledged with an
     /// empty NPDU back — the Simple-ACK a confirmed service earns, at the layer
     /// this transport speaks — and an empty one from the sender to close.
-    fn take_one(self, socket: &UdpSocket) -> Result<Arrived> {
+    fn take_one(self, socket: &UdpSocket) -> Result<Taken> {
         let mut bytes = Vec::new();
         loop {
             let (bvlc, peer) = BacnetTransport::receive_frame(socket)?;
@@ -241,7 +287,7 @@ impl Reading for BacnetTransport {
                 .map_err(|e| classify("acknowledging an NPDU", &e))?;
             if bvlc.npdu.is_empty() {
                 let origin = format!("bacnet://{peer}?function={:02x}", bvlc.function);
-                return Ok(Arrived::new(origin, bytes));
+                return Ok(Taken::new(origin, bytes));
             }
             bytes.extend_from_slice(&bvlc.npdu);
         }
@@ -264,7 +310,7 @@ impl Loopback for BacnetTransport {
         for npdu in payload.chunks(MAX_NPDU).chain(close) {
             own.send_to(&frame(near_end.function, npdu)?, address)
                 .map_err(|e| classify("sending an NPDU", &e))?;
-            near_end.receive_one(&own)?;
+            Self::receive_frame(&own)?;
         }
         Ok(())
     }
@@ -347,11 +393,55 @@ mod tests {
             .send(&address, &[0x01, 0x04, 0x00, 0x05, 0x01, 0x0c])
             .expect("sending");
         let arrived = receiver.receive_one(&socket).expect("receiving");
+        assert!(arrived.defers(), "a confirmed request's client waits");
+        let arrived = arrived.taken().expect("taken");
         assert_eq!(arrived.bytes, [0x01, 0x04, 0x00, 0x05, 0x01, 0x0c]);
         assert!(
             arrived.origin_uri.ends_with("?function=0a"),
             "{}",
             arrived.origin_uri
+        );
+    }
+
+    #[test]
+    fn a_confirmed_request_is_answered_after_the_cycle_and_the_rest_is_at_most_once() {
+        const WRITE: [u8; 8] = [0x01, 0x04, 0x00, 0x05, 0x07, 0x0f, 0x0c, 0x00];
+        let receiver = BacnetTransport::new("127.0.0.1:0").timing_out_after(Duration::from_secs(2));
+        let (socket, address) = receiver.bind().expect("binding");
+        let client = BacnetTransport::new("127.0.0.1:0").timing_out_after(Duration::from_secs(2));
+        let (own, _) = client.bind().expect("the client's socket");
+        let send = |npdu: &[u8]| {
+            own.send_to(&frame(UNICAST, npdu).expect("frame"), &address)
+                .expect("sent");
+        };
+        // Refused: the client is answered a Reject, and does not send again.
+        send(&WRITE);
+        let refused = receiver.receive_one(&socket).expect("refused");
+        assert!(refused.defers());
+        refused
+            .refused(transport::Refusal::Unacceptable)
+            .expect("rejected");
+        let (answer, _) = BacnetTransport::receive_frame(&own).expect("answered");
+        assert_eq!(answer.npdu, [0x01, 0x00, 0x60, 0x07, 0x02], "a Reject");
+        // Failed: the client is answered Error `resources`, and sends again.
+        send(&WRITE);
+        let first = receiver.receive_one(&socket).expect("first");
+        first.failed().expect("failed");
+        let (answer, _) = BacnetTransport::receive_frame(&own).expect("answered");
+        assert_eq!(answer.npdu[2], 0x50, "an Error: {:?}", answer.npdu);
+        assert_eq!(answer.npdu[5..], [0x91, 0x03, 0x91, 0x00], "resources");
+        // Accepted: the client is answered Simple-ACK.
+        send(&WRITE);
+        let again = receiver.receive_one(&socket).expect("again");
+        assert_eq!(again.taken().expect("accepted").bytes, WRITE);
+        let (answer, _) = BacnetTransport::receive_frame(&own).expect("answered");
+        assert_eq!(answer.npdu, [0x01, 0x00, 0x20, 0x07, 0x0f]);
+        // Who-Is: nobody waits.
+        send(&[0x01, 0x00, 0x10, 0x08]);
+        let unconfirmed = receiver.receive_one(&socket).expect("who-is");
+        assert!(
+            !unconfirmed.defers(),
+            "an unconfirmed request is at-most-once"
         );
     }
 
