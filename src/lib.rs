@@ -30,6 +30,7 @@ pub mod confirmed;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
+use transport::ArrivalIdentity;
 use transport::answer::Datagram;
 use transport::bound::{Bound, Reading};
 use transport::error::{Result, classify, protocol_error};
@@ -195,7 +196,8 @@ impl BacnetTransport {
             format!("bacnet://{peer}?function={:02x}", bvlc.function),
             bvlc.npdu,
             acknowledgement,
-        ))
+        )
+        .from_peer(peer))
     }
 }
 
@@ -287,7 +289,7 @@ impl Reading for BacnetTransport {
                 .map_err(|e| classify("acknowledging an NPDU", &e))?;
             if bvlc.npdu.is_empty() {
                 let origin = format!("bacnet://{peer}?function={:02x}", bvlc.function);
-                return Ok(Taken::new(origin, bytes));
+                return Ok(Taken::new(origin, bytes).from_peer(peer));
             }
             bytes.extend_from_slice(&bvlc.npdu);
         }
@@ -299,6 +301,10 @@ impl Reading for BacnetTransport {
 /// is flow-controlled by nothing but the far end's socket buffer, and a
 /// mebibyte lost datagrams on loopback.
 impl Loopback for BacnetTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::PEER
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Bound::new(self.clone(), self.bind()?)))
     }
