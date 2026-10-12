@@ -216,6 +216,10 @@ impl Transport for BacnetTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("a read of the socket waits for a datagram")
+    }
+
     /// One frame, from the socket the first receive bound and kept: what
     /// arrived between two receives waits in its buffer. A confirmed
     /// request is answered after the receive cycle, Simple-ACK or Error;
