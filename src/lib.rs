@@ -224,12 +224,17 @@ impl Transport for BacnetTransport {
     /// arrived between two receives waits in its buffer. A confirmed
     /// request is answered after the receive cycle, Simple-ACK or Error;
     /// anything else is at-most-once ([`AT_MOST_ONCE`]).
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let socket = self.receiving.bound(|| self.bind())?;
         Ok(vec![self.receive_one(socket)?])
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one BVLC datagram carries the whole body")
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         self.sender.send_to(&frame(self.function, bytes)?, target)
     }
 }
