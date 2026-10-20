@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_has_no_artefact_to_claim() {
+    fn a_socket_has_no_artifact_to_claim() {
         assert!(BacnetTransport::new("127.0.0.1:0").claims().is_none());
         assert_eq!(BacnetTransport::new("127.0.0.1:0").name(), "bacnet");
     }
