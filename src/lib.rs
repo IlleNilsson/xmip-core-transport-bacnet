@@ -264,6 +264,9 @@ impl Configured for BacnetTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["bacnet"];
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let mut transport = Self::new(address);
         if settings.optional_boolean("broadcast") == Some(true) {
