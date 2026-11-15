@@ -138,13 +138,6 @@ impl BacnetTransport {
         self
     }
 
-    /// Give up waiting for a datagram after `timeout`.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.receive_timeout = Some(timeout);
-        self
-    }
-
     /// Bind and report the address actually assigned.
     ///
     /// # Errors
@@ -254,26 +247,25 @@ impl Configured for BacnetTransport {
                           Original-Unicast; unicast when left out.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a receive waits for a datagram; unbounded when left out.",
-                applies: Applies::Receive,
-            },
+            transport::configured::timeout(
+                Applies::Receive,
+                None,
+                "How long a receive waits for a datagram; unbounded when left out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["bacnet"];
 
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.receive_timeout)
+    }
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let mut transport = Self::new(address);
         if settings.optional_boolean("broadcast") == Some(true) {
             transport = transport.broadcasting();
-        }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
     }
