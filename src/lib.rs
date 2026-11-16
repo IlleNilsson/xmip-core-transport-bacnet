@@ -113,7 +113,7 @@ pub struct BacnetTransport {
     function: u8,
     /// The socket every send leaves from, bound once.
     sender: Sender,
-    /// The socket the first receive binds, and every receive reads.
+    /// The socket its open binds, and every receive reads.
     receiving: Kept<UdpSocket>,
 }
 
@@ -213,12 +213,12 @@ impl Transport for BacnetTransport {
         transport::Waiting::Waits("a read of the socket waits for a datagram")
     }
 
-    /// One frame, from the socket the first receive bound and kept: what
+    /// One frame, from the socket its open bound and kept: what
     /// arrived between two receives waits in its buffer. A confirmed
     /// request is answered after the receive cycle, Simple-ACK or Error;
     /// anything else is at-most-once ([`AT_MOST_ONCE`]).
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let socket = self.receiving.bound(|| self.bind())?;
+        let socket = self.receiving.listener()?;
         Ok(vec![self.receive_one(socket)?])
     }
 
@@ -268,6 +268,12 @@ impl Configured for BacnetTransport {
             transport = transport.broadcasting();
         }
         Ok(transport)
+    }
+
+    /// The socket every receive takes from, bound where a Receive Location
+    /// listens.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.receiving.listening(|| self.bind())
     }
 }
 
