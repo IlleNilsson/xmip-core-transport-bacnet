@@ -289,7 +289,8 @@ impl BacnetTransport {
 impl Reading for BacnetTransport {
     /// A bound socket waiting for its NPDUs in order, each acknowledged with an
     /// empty NPDU back — the Simple-ACK a confirmed service earns, at the layer
-    /// this transport speaks — and an empty one from the sender to close.
+    /// this transport speaks — until one shorter than [`MAX_NPDU`] closes the
+    /// Stream, as a segmented message's last segment is the one not full.
     fn take_one(self, socket: &UdpSocket) -> Result<Taken> {
         let mut bytes = Vec::new();
         loop {
@@ -297,19 +298,22 @@ impl Reading for BacnetTransport {
             socket
                 .send_to(&frame(self.function, &[])?, peer)
                 .map_err(|e| classify("acknowledging an NPDU", &e))?;
-            if bvlc.npdu.is_empty() {
+            bytes.extend_from_slice(&bvlc.npdu);
+            if bvlc.npdu.len() < MAX_NPDU {
                 let origin = format!("bacnet://{peer}?function={:02x}", bvlc.function);
                 return Ok(Taken::new(origin, bytes).from_peer(peer));
             }
-            bytes.extend_from_slice(&bvlc.npdu);
         }
     }
 }
 
 /// A Stream longer than one NPDU travels as datagrams in order, each
-/// acknowledged before the next goes. Sent unacknowledged, a burst of them
-/// is flow-controlled by nothing but the far end's socket buffer, and a
-/// mebibyte lost datagrams on loopback.
+/// acknowledged before the next goes, and one that fills its last is
+/// closed by an empty one. Sent unacknowledged, a burst of them is
+/// flow-controlled by nothing but the far end's socket buffer, and a
+/// mebibyte lost datagrams on loopback. A node's Send Location sends one
+/// NPDU, so the far end takes it whole; until 2026-11-25 only an empty NPDU
+/// closed, and the far end waited on a node for one that never came.
 impl Loopback for BacnetTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::PEER
@@ -322,7 +326,8 @@ impl Loopback for BacnetTransport {
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
         let near_end = self.clone();
         let (own, _) = near_end.bind()?;
-        let close = std::iter::once(&[][..]);
+        let filled = payload.len().is_multiple_of(MAX_NPDU);
+        let close = filled.then_some(&[][..]);
         for npdu in payload.chunks(MAX_NPDU).chain(close) {
             own.send_to(&frame(near_end.function, npdu)?, address)
                 .map_err(|e| classify("sending an NPDU", &e))?;
@@ -368,8 +373,30 @@ mod tests {
         assert!(arrived.origin_uri.ends_with("?function=0a"));
         let long = vec![0x2a; 5000];
         assert_eq!(loopback.round(&long).expect("four datagrams").bytes, long);
+        let filled = vec![0x2a; MAX_NPDU * 2];
+        assert_eq!(loopback.round(&filled).expect("closed empty").bytes, filled);
         assert!(loopback.ceiling().is_none());
         assert!(loopback.refuses(&long).is_none());
+    }
+
+    /// A Send Location as a node builds it, from its address, sends its one
+    /// NPDU, and the far end takes it whole (the owner, 2026-11-25: *just do
+    /// your best for now*). Until 2026-11-25 the far end waited for an empty
+    /// NPDU to close what it took, which no node sends.
+    #[test]
+    fn a_send_location_sends_one_npdu_its_far_end_takes_whole() {
+        let far = BacnetTransport::loopback().far_end().expect("a far end");
+        let address = format!("bacnet://{}", far.address());
+        let sending = BacnetTransport::open(&address, Applies::Send, &[]).expect("sending");
+        let taking = std::thread::spawn(move || far.take_one());
+
+        sending
+            .send(BacnetTransport::own_target(&address), b"order")
+            .expect("sent where its address says");
+
+        let taken = taking.join().expect("the far end").expect("taken");
+        assert_eq!(taken.bytes, b"order");
+        assert!(taken.origin_uri.ends_with("?function=0a"), "{taken:?}");
     }
 
     #[test]

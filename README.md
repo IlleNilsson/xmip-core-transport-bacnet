@@ -6,6 +6,8 @@ A Send Location sends from one socket per address family, bound on its first sen
 
 A Receive Location keeps its socket, bound as its transport is opened (`Configured::listening`; on its first receive until 2026-11-16) (`transport::kept::Kept`): a datagram that arrives between two receives waits in its buffer for the next, where until 2026-09-27 each receive bound a socket of its own and a datagram sent between receives was lost.
 
+The loopback's far end takes NPDUs until one shorter than a datagram carries closes the Stream, as a segmented message's last segment is the one not full, so it takes a node's one NPDU whole, and the near end sends an empty NPDU only after a full one; until 2026-11-25 only an empty NPDU closed it, and a node's NPDU was never taken.
+
 ## Acknowledgement
 
 A confirmed request's client is answered after the whole receive cycle. The
