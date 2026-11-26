@@ -24,42 +24,70 @@
 //! at-most-once ([`AT_MOST_ONCE`]). Each NPDU arrives whole.
 //!
 //! The origin URI carries what the frame knew: `bacnet://peer?function=0a`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod confirmed;
+#[cfg(feature = "declaration")]
+pub mod declaration;
 
+#[cfg(feature = "default")]
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 use transport::ArrivalIdentity;
+#[cfg(feature = "default")]
 use transport::answer::Datagram;
+#[cfg(feature = "default")]
 use transport::bound::{Bound, Reading};
+#[cfg(feature = "default")]
 use transport::error::{Result, classify, protocol_error};
+#[cfg(feature = "default")]
 use transport::kept::Kept;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::sender::Sender;
+#[cfg(feature = "default")]
 use transport::socket;
+#[cfg(feature = "default")]
 use transport::{Acknowledgement, Arrived, Configured, Directions, Taken, Transport};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 use crate::confirmed::Confirmed;
 
 /// Why an NPDU that is not a confirmed request cannot be acknowledged after
 /// the receive cycle.
+#[cfg(feature = "default")]
 pub const AT_MOST_ONCE: &str = "a BACnet NPDU that is not a confirmed request in one segment \
                                 has nobody waiting on an answer: it is a datagram";
 
 /// The BVLC type byte: BACnet/IP.
+#[cfg(feature = "default")]
 const BVLC_TYPE: u8 = 0x81;
 /// Original-Unicast-NPDU.
+#[cfg(feature = "default")]
 const UNICAST: u8 = 0x0a;
 /// Original-Broadcast-NPDU.
+#[cfg(feature = "default")]
 pub const BROADCAST: u8 = 0x0b;
 /// The largest datagram BACnet/IP allows, header included.
+#[cfg(feature = "default")]
 pub const MAX_DATAGRAM: usize = 1497;
 /// The most NPDU one datagram carries: the datagram less the BVLC header.
+#[cfg(feature = "default")]
 pub const MAX_NPDU: usize = MAX_DATAGRAM - 4;
 
 /// One BVLC frame, split.
+#[cfg(feature = "default")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bvlc {
     pub function: u8,
@@ -70,6 +98,7 @@ pub struct Bvlc {
 ///
 /// # Errors
 /// An NPDU that with its header exceeds [`MAX_DATAGRAM`].
+#[cfg(feature = "default")]
 pub fn frame(function: u8, npdu: &[u8]) -> Result<Vec<u8>> {
     let total = npdu.len() + 4;
     if total > MAX_DATAGRAM {
@@ -90,6 +119,7 @@ pub fn frame(function: u8, npdu: &[u8]) -> Result<Vec<u8>> {
 ///
 /// # Errors
 /// Not BACnet/IP, or a length that disagrees with the datagram.
+#[cfg(feature = "default")]
 pub fn read_frame(datagram: &[u8]) -> Result<Bvlc> {
     if datagram.len() < 4 || datagram[0] != BVLC_TYPE {
         return Err(protocol_error("a datagram that is not BACnet/IP"));
@@ -106,6 +136,7 @@ pub fn read_frame(datagram: &[u8]) -> Result<Bvlc> {
     })
 }
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct BacnetTransport {
     bind: String,
@@ -117,6 +148,7 @@ pub struct BacnetTransport {
     receiving: Kept<UdpSocket>,
 }
 
+#[cfg(feature = "default")]
 impl BacnetTransport {
     /// Bind at `bind`; `0.0.0.0:47808` is the standard port.
     #[must_use]
@@ -194,6 +226,7 @@ impl BacnetTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for BacnetTransport {
     fn name(&self) -> &'static str {
         "bacnet"
@@ -232,31 +265,10 @@ impl Transport for BacnetTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for BacnetTransport {
-    /// The address is the local socket a Receive Location binds —
-    /// `0.0.0.0:47808` the standard port; a Send Location sends to the target
-    /// its route gives.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "broadcast",
-                kind: Kind::Boolean,
-                presence: Presence::Optional,
-                meaning: "Whether NPDUs go out as Original-Broadcast rather than \
-                          Original-Unicast; unicast when left out.",
-                applies: Applies::Send,
-            },
-            transport::configured::timeout(
-                Applies::Receive,
-                None,
-                "How long a receive waits for a datagram; unbounded when left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["bacnet"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.receive_timeout)
@@ -277,6 +289,7 @@ impl Configured for BacnetTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl BacnetTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout on every wait for a datagram.
@@ -286,6 +299,7 @@ impl BacnetTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Reading for BacnetTransport {
     /// A bound socket waiting for its NPDUs in order, each acknowledged with an
     /// empty NPDU back — the Simple-ACK a confirmed service earns, at the layer
@@ -314,6 +328,7 @@ impl Reading for BacnetTransport {
 /// mebibyte lost datagrams on loopback. A node's Send Location sends one
 /// NPDU, so the far end takes it whole; until 2026-11-25 only an empty NPDU
 /// closed, and the far end waited on a node for one that never came.
+#[cfg(feature = "default")]
 impl Loopback for BacnetTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::PEER
@@ -341,7 +356,7 @@ impl Loopback for BacnetTransport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     #[test]
     fn bacnet_declares_its_settings_and_reads_through_them() {
