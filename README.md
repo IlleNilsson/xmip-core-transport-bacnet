@@ -28,11 +28,6 @@ NPDU arrives whole. Which service it is, and its parameters, stay a contract's.
 
 What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `broadcast` and `timeout`, and `SCHEMES`, `bacnet`. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code is behind the default feature. So the library the surfaces load carries it without the code, through the gathering crate xmip-core-declaration (open problem 48), and the language server and the desktop suggest and check a BACnet/IP Location's settings though no node in their process loaded the technology. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
 
-## Toolchain
-
-`rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
-here.
-
 ## Verification
 
 The included workflow is manual-only and calls the versioned shared workflow at
